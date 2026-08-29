@@ -364,9 +364,13 @@ function page(
 		{
 			status,
 			headers: {
+				"Cache-Control": "no-store",
 				"Content-Type": "text/html; charset=utf-8",
+				"Content-Security-Policy": "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src https: data:; object-src 'none'; script-src 'none'; style-src 'unsafe-inline'",
+				"Permissions-Policy": "camera=(), geolocation=(), microphone=()",
 				"Referrer-Policy": "no-referrer",
 				"X-Content-Type-Options": "nosniff",
+				"X-Frame-Options": "DENY",
 			},
 		},
 	);
@@ -383,7 +387,7 @@ export function homepage(config: SiteConfig, pageUrl: string): Response {
 	`,
 		200,
 		{
-			description: `Transparent ${config.siteName} short links with a privacy-first splash page.`,
+			description: `${config.siteName} is a privacy-first, self-hosted link shortener with transparent previews, browser extensions, an Android app, Discord integration, and CLI tools. Host your own: https://github.com/Aiko-IT-Systems/cloudflare-link-shortener`,
 			imageUrl: brandImageUrl,
 			pageUrl,
 			siteName: config.siteName,
@@ -391,7 +395,8 @@ export function homepage(config: SiteConfig, pageUrl: string): Response {
 	);
 }
 
-export function privacyPolicy(config: SiteConfig): Response {
+export function privacyPolicy(config: SiteConfig, pageUrl: string): Response {
+	const brandImageUrl = new URL(config.brandLogoUrl, pageUrl).href;
 	return page(
 		config,
 		"Privacy policy",
@@ -401,11 +406,15 @@ export function privacyPolicy(config: SiteConfig): Response {
 		<dl>
 			<div class="meta">
 				<dt>Service and hosting</dt>
-				<dd>The service runs on Cloudflare Workers and uses Cloudflare KV to store the application data needed to operate it. Cloudflare may process normal technical request data while providing that infrastructure under its own privacy policy. AITSYS Go stores link destinations, slugs, optional settings, public creator names, ownership, and preview metadata. A short link and its preview details may be publicly visible. Issued API tokens are stored only as hashes.</dd>
+				<dd>The service runs on Cloudflare Workers and uses Cloudflare KV plus SQLite-backed Durable Objects to store and coordinate the application data needed to operate it. Cloudflare may process normal technical request data while providing that infrastructure under its own privacy policy. AITSYS Go stores link destinations, slugs, optional settings, public creator names, ownership, and preview metadata. A short link and its preview details may be publicly visible. Issued API tokens are stored only as hashes.</dd>
+			</div>
+			<div class="meta">
+				<dt>Link passwords and abuse prevention</dt>
+				<dd>Password-protected links store a randomly salted, keyed cryptographic verifier, not the password itself. Older plaintext records are upgraded after a successful unlock. Management APIs reveal only whether protection exists and never return password material. To limit guessing without globally locking a link, the Worker derives a keyed one-way identifier from the requesting network address and keeps failure state separately for that requester and link. The raw address is not stored in this state, which is automatically deleted after its 15-minute window or a cooldown of at most one hour.</dd>
 			</div>
 			<div class="meta">
 				<dt>Browser extension and Android app</dt>
-				<dd>The browser extension stores its configured API base URL and issued user token in browser extension storage, which is not encrypted. It sends the selected page URL and entered fields only to that configured API. The Android app stores its issued token encrypted with Android Keystore, excludes it from Android backup, and keeps ordinary settings and cached public branding locally. It sends entered link data or shared URLs only to the configured API. Both clients fetch public branding metadata from that API.</dd>
+				<dd>The browser extension stores its configured API base URL and issued user token in browser extension storage, which is not encrypted. It sends the selected page URL and entered fields only to that configured API. The Android app stores its issued token encrypted with Android Keystore, excludes it from Android backup, and keeps ordinary settings and cached public branding locally. It sends entered link data or shared URLs only to the configured API. Both clients fetch public branding metadata from that API. Google Play-distributed Android installs use Google Play's in-app update service. Google Play processes device metadata, the installed app version, and installed module or asset-pack information to check for and install updates; AITSYS Go does not receive that update-check data. Sideloaded builds do not receive updates through this service.</dd>
 			</div>
 			<div class="meta">
 				<dt>Discord and distribution</dt>
@@ -420,8 +429,10 @@ export function privacyPolicy(config: SiteConfig): Response {
 	`,
 		200,
 		{
-			description: `${config.siteName} privacy policy. No advertising, analytics, click tracking, cookies, or telemetry.`,
-			suppressSocialPreview: true,
+			description: `${config.siteName} privacy policy: links, account tokens, Discord interactions, browser extensions, Android storage, and Cloudflare hosting — with no advertising, analytics, click tracking, cookies, or telemetry. Self-host: https://github.com/Aiko-IT-Systems/cloudflare-link-shortener`,
+			imageUrl: brandImageUrl,
+			pageUrl,
+			siteName: config.siteName,
 		},
 	);
 }
@@ -499,8 +510,9 @@ export function passwordPrompt(
 	config: SiteConfig,
 	record: LinkRecord,
 	invalid = false,
+	retryAfterSeconds?: number,
 ): Response {
-	return page(
+	const response = page(
 		config,
 		"Password required",
 		`
@@ -512,9 +524,12 @@ export function passwordPrompt(
 			<button type="submit">Unlock link</button>
 		</form>
 	`,
-		invalid ? 401 : 200,
+		retryAfterSeconds ? 429 : invalid ? 401 : 200,
 		{ suppressSocialPreview: true },
 	);
+	if (retryAfterSeconds)
+		response.headers.set("Retry-After", String(retryAfterSeconds));
+	return response;
 }
 
 export function notFound(config: SiteConfig): Response {
