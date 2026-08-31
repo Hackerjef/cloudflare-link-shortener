@@ -21,6 +21,19 @@ describe("Play release-note normalizer", () => {
 		expect(result).not.toContain("automation");
 	});
 
+	it("removes multiline comments and tag delimiters", () => {
+		const result = normalizePlayNotes(
+			"before <!-- hidden\ncomment --> after <script>alert(1)</script>",
+		);
+		expect(result).toBe("before after script alert(1) /script");
+	});
+
+	it("removes malformed comment delimiters too", () => {
+		const result = normalizePlayNotes("safe <!-- unfinished content");
+		expect(result).toBe("safe");
+		expect(result).not.toContain("<!--");
+	});
+
 	it("puts custom notes before generated changes", () => {
 		const result = normalizePlayNotes("- Generated fix", {
 			operatorNotes: "- Important update",
@@ -35,9 +48,8 @@ describe("Play release-note normalizer", () => {
 		const result = normalizePlayNotes("- One two three four five six", {
 			limit: 18,
 		});
-		const body = result.split("\n")[1];
-		expect(Array.from(body).length).toBeLessThanOrEqual(18);
-		expect(body.endsWith("…")).toBe(true);
+		expect(Array.from(result).length).toBeLessThanOrEqual(18);
+		expect(result.endsWith("…")).toBe(true);
 	});
 
 	it("rejects an empty converted body", () => {
