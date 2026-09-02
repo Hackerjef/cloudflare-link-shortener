@@ -97,7 +97,7 @@ function resolveHttpsUrl(
 	}
 }
 
-type SocialProvider = "facebook" | "instagram";
+type SocialProvider = "facebook" | "instagram" | "x";
 
 function socialProvider(destinationUrl: string): SocialProvider | undefined {
 	try {
@@ -108,6 +108,11 @@ function socialProvider(destinationUrl: string): SocialProvider | undefined {
 			/^\/(?:reel|reels|p|tv)\/[A-Za-z0-9_-]+\/?$/.test(url.pathname)
 		)
 			return "instagram";
+		if (
+			(host === "x.com" || host === "www.x.com" || host === "twitter.com" || host === "www.twitter.com") &&
+			/^\/[^/]+\/status\/\d+\/?$/.test(url.pathname)
+		)
+			return "x";
 		if (host !== "facebook.com" && host !== "www.facebook.com") return undefined;
 		if (/^\/reel\/\d+\/?$/.test(url.pathname)) return "facebook";
 		if (url.pathname === "/watch" && /^\d+$/.test(url.searchParams.get("v") ?? "")) return "facebook";
@@ -118,25 +123,43 @@ function socialProvider(destinationUrl: string): SocialProvider | undefined {
 	return undefined;
 }
 
-function isPublicSocialMp4(
+function directHttpsMp4(
+	value: string | undefined,
+	destinationUrl: string,
+	contentType?: string,
+): string | undefined {
+	const resolved = resolveHttpsUrl(value, destinationUrl);
+	if (!resolved) return undefined;
+	const url = new URL(resolved);
+	const declaresMp4 = contentType?.split(";", 1)[0]?.trim().toLowerCase() === "video/mp4";
+	return url.pathname.toLowerCase().endsWith(".mp4") || declaresMp4 ? resolved : undefined;
+}
+
+function publicSocialMp4(
 	value: string | undefined,
 	provider: SocialProvider,
 	destinationUrl: string,
-): value is string {
-	const resolved = resolveHttpsUrl(value, destinationUrl);
-	if (!resolved) return false;
+): string | undefined {
+	const resolved = directHttpsMp4(value, destinationUrl);
+	if (!resolved) return undefined;
 	const url = new URL(resolved);
 	const host = url.hostname.toLowerCase();
 	const knownCdn =
 		provider === "instagram"
 			? host === "cdninstagram.com" || host.endsWith(".cdninstagram.com")
-			: host === "fbcdn.net" || host.endsWith(".fbcdn.net");
-	return knownCdn && url.pathname.endsWith(".mp4");
+			: provider === "facebook"
+				? host === "fbcdn.net" || host.endsWith(".fbcdn.net")
+				: host === "video.twimg.com";
+	return knownCdn ? resolved : undefined;
 }
 
 function positiveInteger(value: string | undefined): number | undefined {
 	const number = Number(value);
 	return Number.isInteger(number) && number > 0 ? number : undefined;
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function embeddedInstagramVideo(
@@ -150,7 +173,8 @@ function embeddedInstagramVideo(
 			const url = versions
 				.filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
 				.map((item) => (typeof item.url === "string" ? item.url : undefined))
-				.find((value) => isPublicSocialMp4(value, "instagram", destinationUrl));
+				.map((value) => publicSocialMp4(value, "instagram", destinationUrl))
+				.find((value): value is string => Boolean(value));
 			if (!url) continue;
 			const nearby = html.slice(Math.max(0, (match.index ?? 0) - 5_000), (match.index ?? 0) + 5_000);
 			return {
@@ -195,22 +219,62 @@ function primaryInstagramCarouselIsImage(html: string): boolean {
 	return false;
 }
 
-function extractSocialVideoMetadata(
+function embeddedXVideo(
+	html: string,
+	destinationUrl: string,
+): { url: string; width?: number; height?: number } | undefined {
+	let statusId: string | undefined;
+	try {
+		statusId = /^\/[^/]+\/status\/(\d+)\/?$/.exec(new URL(destinationUrl).pathname)?.[1];
+	} catch {
+		return undefined;
+	}
+	if (!statusId) return undefined;
+
+	// X hydrates replies, quoted posts, and recommendations into the same page. The
+	// requested Tweet's media records are keyed by its base64 `Tweet:<status id>`.
+	const entityPrefix = `client:${btoa(`Tweet:${statusId}`)}:media_entities2:`;
+	const variantPattern = new RegExp(
+		`${escapeRegExp(entityPrefix)}\\d+:video_info:variants:\\d+"\\s*:\\$R\\[\\d+\\]\\s*=\\s*\\{[^{}]{0,600}?bitrate:(\\d+),content_type:"video\\/mp4",url:"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)"`,
+		"g",
+	);
+	const variants: Array<{ url: string; bitrate: number }> = [];
+	for (const match of html.matchAll(variantPattern)) {
+		try {
+			const url: unknown = JSON.parse(`"${match[2]}"`);
+			const publicUrl = typeof url === "string" ? publicSocialMp4(url, "x", destinationUrl) : undefined;
+			if (!publicUrl) continue;
+			variants.push({ url: publicUrl, bitrate: Number(match[1]) });
+		} catch {
+			// X's hydrated state is an implementation detail and may change shape.
+		}
+	}
+	const best = variants.sort((left, right) => right.bitrate - left.bitrate)[0];
+	if (!best) return undefined;
+	const dimensions = /\/vid\/[^/]+\/(\d+)x(\d+)\//.exec(new URL(best.url).pathname);
+	return {
+		url: best.url,
+		width: positiveInteger(dimensions?.[1]),
+		height: positiveInteger(dimensions?.[2]),
+	};
+}
+
+function extractVideoMetadata(
 	headHtml: string,
 	fullHtml: string,
 	destinationUrl: string,
 ): Pick<EmbedMetadata, "embedVideoUrl" | "embedVideoWidth" | "embedVideoHeight"> {
 	const provider = socialProvider(destinationUrl);
-	if (!provider) return {};
 	if (provider === "instagram" && primaryInstagramCarouselIsImage(fullHtml)) return {};
 	const ogVideo = metaContent(headHtml, ["og:video:secure_url", "og:video"]);
+	const ogVideoType = metaContent(headHtml, ["og:video:type"]);
 	const embedded =
 		provider === "instagram"
 			? embeddedInstagramVideo(fullHtml, destinationUrl)
-			: undefined;
-	const directVideo = isPublicSocialMp4(ogVideo, provider, destinationUrl)
-		? ogVideo
-		: embedded?.url;
+			: provider === "x"
+				? embeddedXVideo(fullHtml, destinationUrl)
+				: undefined;
+	const directVideo = directHttpsMp4(ogVideo, destinationUrl, ogVideoType) ?? embedded?.url;
 	if (!directVideo) return {};
 	const width = positiveInteger(metaContent(headHtml, ["og:video:width"])) ?? embedded?.width;
 	const height = positiveInteger(metaContent(headHtml, ["og:video:height"])) ?? embedded?.height;
@@ -290,7 +354,7 @@ export function extractEmbedMetadata(
 		...(embedTitle ? { embedTitle } : {}),
 		...(embedDescription ? { embedDescription } : {}),
 		...(embedImageUrl ? { embedImageUrl } : {}),
-		...extractSocialVideoMetadata(headHtml, html, destinationUrl),
+		...extractVideoMetadata(headHtml, html, destinationUrl),
 		...(embedSiteName ? { embedSiteName } : {}),
 	};
 }
