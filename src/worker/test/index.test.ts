@@ -3,6 +3,7 @@ import app from "../src";
 import { extractEmbedMetadata, fetchTargetMetadata } from "../src/metadata";
 import { createLink as createStoredLink } from "../src/store";
 import { LinkRecord } from "../src/types";
+import { createLinkSchema, isPublicHttpsUrl } from "../src/validation";
 
 class MemoryKV {
 	private readonly values = new Map<string, string>();
@@ -397,6 +398,48 @@ describe("link shortener", () => {
 		expect(bad.status).toBe(401);
 	});
 
+	test("generates an OpenAPI 3.1 document for every callable Worker endpoint", async () => {
+		const response = await app.fetch(
+			new Request("https://go.aitsys.dev/openapi.json"),
+			env(),
+		);
+		const document = (await response.json()) as {
+			openapi: string;
+			servers: Array<{ url: string }>;
+			paths: Record<string, unknown>;
+			components: { securitySchemes: Record<string, unknown> };
+		};
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("Content-Type")).toContain("application/json");
+		expect(document.openapi).toBe("3.1.1");
+		expect(document.servers).toEqual([{ url: "https://go.aitsys.dev", description: "This deployed AITSYS Go instance" }]);
+		expect(document.components.securitySchemes).toHaveProperty("bearerAuth");
+		for (const path of [
+			"/openapi.json",
+			"/",
+			"/privacy",
+			"/robots.txt",
+			"/api/v1/metadata",
+			"/api/v1/connection-test",
+			"/api/v1/me",
+			"/api/v1/accounts",
+			"/api/v1/accounts/{accountId}",
+			"/api/v1/accounts/{accountId}/discord-user",
+			"/api/v1/accounts/{accountId}/tokens",
+			"/api/v1/tokens",
+			"/api/v1/tokens/{tokenId}/revoke",
+			"/api/v1/admin/links",
+			"/api/v1/links",
+			"/api/v1/links/{slug}",
+			"/api/v1/links/{slug}/refresh-metadata",
+			"/api/v1/links/{slug}/disable",
+			"/api/v1/discord/interactions",
+			"/{slug}",
+		])
+			expect(document.paths).toHaveProperty(path);
+	});
+
 	test("rejects invalid URLs, duplicate slugs, and reserved slugs", async () => {
 		const envValue = env();
 		const invalidUrl = await create(envValue, {
@@ -424,6 +467,64 @@ describe("link shortener", () => {
 		expect(first.status).toBe(201);
 		expect(duplicate.status).toBe(409);
 		expect(reserved.status).toBe(400);
+	});
+
+	test("rejects unsafe metadata-fetch URLs before creating a link", async () => {
+		for (const url of [
+			"https://user:password@example.com/private",
+			"https://localhost/private",
+			"https://127.0.0.1/private",
+			"https://[::1]/private",
+			"https://10.0.0.1/private",
+		]) {
+			expect(isPublicHttpsUrl(url)).toBe(false);
+			expect(createLinkSchema.safeParse({ destinationUrl: url }).success).toBe(
+				false,
+			);
+		}
+	});
+
+	test("rejects oversized API request bodies before JSON parsing", async () => {
+		const response = await app.fetch(
+			new Request("https://go.aitsys.dev/api/v1/links", {
+				method: "POST",
+				headers: authed().headers,
+				body: JSON.stringify({ destinationUrl: "https://example.com", title: "x".repeat(33_000) }),
+			}),
+			env(),
+		);
+		expect(response.status).toBe(413);
+	});
+
+	test("rejects oversized public password submissions before form parsing", async () => {
+		const envValue = env();
+		await create(envValue, {
+			slug: "bounded-password",
+			destinationUrl: "https://example.com",
+			creator: "Lulalaby",
+			password: "cat-safe-password",
+		});
+		const response = await app.fetch(
+			new Request("https://go.aitsys.dev/bounded-password", {
+				method: "POST",
+				headers: { "Content-Type": "application/x-www-form-urlencoded" },
+				body: `padding=${"x".repeat(9_000)}`,
+			}),
+			envValue,
+		);
+		expect(response.status).toBe(413);
+	});
+
+	test("does not follow metadata redirects to unsafe addresses", async () => {
+		const fetchMock = vi.fn(async () =>
+			new Response(null, {
+				status: 302,
+				headers: { Location: "https://127.0.0.1/private" },
+			}),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		await expect(fetchTargetMetadata("https://example.com/redirect")).resolves.toEqual({});
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 
 	test("reads link metadata", async () => {
