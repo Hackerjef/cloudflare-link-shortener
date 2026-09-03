@@ -168,7 +168,7 @@ app.get("/privacy", (c) =>
 );
 app.get("/robots.txt", () => robots());
 registerOpenApiDocumentation(app.openAPIRegistry);
-app.doc31("/openapi.json", (c) => openApiDocument(new URL(c.req.url).origin));
+app.doc("/openapi.json", (c) => openApiDocument(new URL(c.req.url).origin));
 app.post("/api/v1/discord/interactions", (c) =>
 	handleDiscordInteraction(c.req.raw, c.env, new URL(c.req.url).origin),
 );
