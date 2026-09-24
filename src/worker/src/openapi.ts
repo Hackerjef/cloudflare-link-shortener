@@ -89,6 +89,16 @@ const linkOwner = z
 	.object({ kind: z.enum(["account", "discord"]), id: z.string() })
 	.openapi("LinkOwner");
 
+const embedMedia = z
+	.object({
+		kind: z.enum(["image", "video"]),
+		url: z.url().max(2048),
+		width: z.number().int().positive().optional(),
+		height: z.number().int().positive().optional(),
+		description: z.string().max(1024).optional(),
+	})
+	.openapi("EmbedMedia");
+
 const link = z
 	.object({
 		slug: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$/),
@@ -103,6 +113,7 @@ const link = z
 		embedVideoUrl: z.url().optional(),
 		embedVideoWidth: z.number().int().positive().optional(),
 		embedVideoHeight: z.number().int().positive().optional(),
+		embedMedia: z.array(embedMedia).max(10).optional(),
 		embedSiteName: z.string().max(80).optional(),
 		metadataFetchedAt: z.iso.datetime().optional(),
 		expiresAt: z.iso.datetime().optional(),
@@ -120,14 +131,9 @@ const publicHttpsUrl = z
 const linkCreate = z
 	.object({
 		destinationUrl: publicHttpsUrl,
-		creator: z
-			.string()
-			.min(1)
-			.max(80)
-			.optional()
-			.openapi({
-				description: "Master tokens only; ignored for issued tokens.",
-			}),
+		creator: z.string().min(1).max(80).optional().openapi({
+			description: "Master tokens only; ignored for issued tokens.",
+		}),
 		slug: z
 			.string()
 			.regex(/^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$/)
@@ -620,53 +626,6 @@ export function registerOpenApiDocumentation(registry: OpenAPIRegistry): void {
 			...errorResponses,
 		},
 	});
-	registry.registerPath({
-		method: "post",
-		path: "/discord/interactions",
-		tags: ["Discord"],
-		summary: "Handle a Discord interaction",
-		description:
-			"Discord-only webhook. Raw requests require current Ed25519 signature headers. Supports Pings, application and message commands, component interactions, and modal submissions.",
-		request: {
-			headers: z.object({
-				"x-signature-ed25519": z.string().regex(/^[a-f\d]{128}$/i),
-				"x-signature-timestamp": z.string().regex(/^\d+$/),
-			}),
-			body: {
-				required: true,
-				content: {
-					"application/json": {
-						schema: z
-							.object({
-								type: z.number().int(),
-								application_id: z.string().optional(),
-								data: z.record(z.string(), z.unknown()).optional(),
-							})
-							.passthrough(),
-					},
-				},
-			},
-		},
-		responses: {
-			200: {
-				description: "Discord interaction callback.",
-				content: {
-					"application/json": {
-						schema: z
-							.object({
-								type: z.number().int(),
-								data: z.record(z.string(), z.unknown()).optional(),
-							})
-							.passthrough(),
-					},
-				},
-			},
-			400: textResponse,
-			401: textResponse,
-			405: textResponse,
-			413: textResponse,
-		},
-	});
 }
 
 export function openApiDocument(origin: string) {
@@ -682,14 +641,19 @@ export function openApiDocument(origin: string) {
 				"Generated from the Worker route annotations. JSON success responses use `{ success: true, result }`; errors use `{ success: false, errors }`. Returned timestamps use canonical UTC ISO-8601 with milliseconds and a trailing Z.",
 			license: { name: "Apache-2.0" },
 		},
-		servers: [{ url: origin + "/api/v1", description: "This deployed AITSYS Go instance" }],
+		servers: [
+			{
+				url: origin + "/api/v1",
+				description: "This deployed AITSYS Go instance",
+			},
+		],
 		tags: [
 			{ name: "Public" },
 			{ name: "Identity" },
 			{ name: "Accounts" },
 			{ name: "Tokens" },
 			{ name: "Links" },
-			{ name: "Discord" }
+			{ name: "Discord" },
 		],
 	};
 }

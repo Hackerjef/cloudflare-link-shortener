@@ -3,6 +3,15 @@ export type LinkOwner = {
 	id: string;
 };
 
+/** Public, automatically extracted media for Discord Component Embed galleries. */
+export type EmbedMedia = {
+	kind: "image" | "video";
+	url: string;
+	width?: number;
+	height?: number;
+	description?: string;
+};
+
 export type LinkRecord = {
 	slug: string;
 	destinationUrl: string;
@@ -16,8 +25,11 @@ export type LinkRecord = {
 	embedVideoUrl?: string;
 	embedVideoWidth?: number;
 	embedVideoHeight?: number;
+	embedMedia?: EmbedMedia[];
 	embedSiteName?: string;
 	metadataFetchedAt?: string;
+	/** Internal metadata extractor revision; used to refresh legacy social previews once. */
+	metadataVersion?: number;
 	/** @deprecated Legacy plaintext value; upgraded after a successful unlock. */
 	password?: string;
 	passwordVerifier?: PasswordVerifier;

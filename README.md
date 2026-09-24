@@ -1,6 +1,6 @@
 [![Latest release](https://img.shields.io/github/v/release/Aiko-IT-Systems/cloudflare-link-shortener?display_name=tag&sort=semver&style=for-the-badge)](https://github.com/Aiko-IT-Systems/cloudflare-link-shortener/releases/latest) [![Release pipeline](https://img.shields.io/github/actions/workflow/status/Aiko-IT-Systems/cloudflare-link-shortener/release.yml?branch=main&label=release&style=for-the-badge)](https://github.com/Aiko-IT-Systems/cloudflare-link-shortener/actions/workflows/release.yml) [![Repository size](https://img.shields.io/github/repo-size/Aiko-IT-Systems/cloudflare-link-shortener?label=repository%20size&style=for-the-badge)](https://github.com/Aiko-IT-Systems/cloudflare-link-shortener) [![License](https://img.shields.io/badge/license-Apache--2.0-7f52ff?style=for-the-badge)](LICENSE.md)
 
-[![Firefox Add-ons](https://img.shields.io/amo/v/aitsys-go?style=for-the-badge&logo=firefoxbrowser&logoColor=FF7139&label=Firefox)](https://addons.mozilla.org/en-US/firefox/addon/aitsys-go/) [![Chrome Web Store](https://img.shields.io/chrome-web-store/v/aojofmfhigoogjgafmnciphnijnkcmpe?style=for-the-badge&logo=googlechrome&logoColor=4285F4&label=Chrome)](https://chromewebstore.google.com/detail/aojofmfhigoogjgafmnciphnijnkcmpe) [![Microsoft Edge](https://img.shields.io/badge/Edge-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white)]([text](https://microsoftedge.microsoft.com/addons/detail/fokopafcjnjknmmndcplhgainhapcdoc)) [![Google Play](https://img.shields.io/badge/Google_Play-414141?style=for-the-badge&logo=googleplay&logoColor=white)](https://play.google.com/store/apps/details?id=dev.aitsys.go)
+[![Firefox Add-ons](https://img.shields.io/amo/v/aitsys-go?style=for-the-badge&logo=firefoxbrowser&logoColor=FF7139&label=Firefox)](https://addons.mozilla.org/en-US/firefox/addon/aitsys-go/) [![Chrome Web Store](https://img.shields.io/chrome-web-store/v/aojofmfhigoogjgafmnciphnijnkcmpe?style=for-the-badge&logo=googlechrome&logoColor=4285F4&label=Chrome)](https://chromewebstore.google.com/detail/aojofmfhigoogjgafmnciphnijnkcmpe) [![Microsoft Edge](https://img.shields.io/badge/Edge-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white)](https://microsoftedge.microsoft.com/addons/detail/aitsys-go-for-microsoft-e/fokopafcjnjknmmndcplhgainhapcdoc) [![Google Play](https://img.shields.io/badge/Google_Play-414141?style=for-the-badge&logo=googleplay&logoColor=white)](https://play.google.com/store/apps/details?id=dev.aitsys.go)
 
 # AITSYS Go
 
@@ -16,6 +16,9 @@ It provides:
 - an Android 10+ share target and link-management app;
 - a private Discord user app; and
 - PowerShell and Bash tools for creating and administering links.
+
+We do not offer a public AITSYS Go instance. If you want to use AITSYS Go, you can self-host it with your own branding. 
+See [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md) for more information.
 
 ## Apps & Extensions
 

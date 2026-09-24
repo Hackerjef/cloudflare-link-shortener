@@ -10,6 +10,7 @@ type PageMeta = {
 	pageUrl?: string;
 	siteName?: string;
 	suppressSocialPreview?: boolean;
+	discordComponentEmbed?: string;
 };
 
 function escapeHtml(value: string): string {
@@ -30,6 +31,156 @@ function escapeMediaUrl(value: string): string {
 		.replace(/>/g, "&gt;")
 		.replace(/"/g, "&quot;")
 		.replace(/'/g, "&#39;");
+}
+
+function escapeDiscordMarkdown(value: string): string {
+	return value
+		.replace(/\\/g, "\\\\")
+		.replace(/([*_~`\[\]<>])/g, "\\$1")
+		.replace(/@/g, "@\u200b")
+		.replace(/\r?\n/g, " ");
+}
+
+function scriptSafeJson(value: unknown): string {
+	return JSON.stringify(value)
+		.replace(/</g, "\\u003c")
+		.replace(/>/g, "\\u003e")
+		.replace(/&/g, "\\u0026")
+		.replace(/\u2028/g, "\\u2028")
+		.replace(/\u2029/g, "\\u2029");
+}
+
+const AITSYS_GO_REPOSITORY =
+	"https://github.com/Aiko-IT-Systems/cloudflare-link-shortener";
+// Discord rejects an entire Component Embed when its JSON document exceeds this
+// limit. Signed social-CDN URLs can be hundreds of bytes each, so the renderer
+// must choose a fitting prefix rather than blindly emitting ten gallery items.
+const DISCORD_COMPONENT_EMBED_MAX_BYTES = 3_000;
+
+function discordComponentEmbed(
+	config: SiteConfig,
+	record: LinkRecord,
+	pageUrl: string,
+): string {
+	if (record.suppressSocialPreview) return "";
+	const seen = new Set<string>();
+	const gallerySource = record.embedMedia?.length
+		? record.embedMedia
+		: [
+				...(record.embedImageUrl
+					? [{ kind: "image" as const, url: record.embedImageUrl }]
+					: []),
+				...(record.embedVideoUrl
+					? [
+							{
+								kind: "video" as const,
+								url: record.embedVideoUrl,
+								...(record.embedVideoWidth
+									? { width: record.embedVideoWidth }
+									: {}),
+								...(record.embedVideoHeight
+									? { height: record.embedVideoHeight }
+									: {}),
+							},
+						]
+					: []),
+			];
+	const isInstagramReel = (() => {
+		try {
+			const url = new URL(record.destinationUrl);
+			return (url.hostname === "instagram.com" || url.hostname === "www.instagram.com") &&
+				url.pathname.startsWith("/reel/");
+		} catch {
+			return false;
+		}
+	})();
+	const componentMedia =
+		isInstagramReel && gallerySource.some((item) => item.kind === "video")
+			? gallerySource.filter((item) => item.kind === "video")
+			: gallerySource;
+	const media = componentMedia
+		.filter((item) => {
+			if (seen.has(item.url)) return false;
+			seen.add(item.url);
+			return true;
+		})
+		.slice(0, 10);
+	const title = escapeDiscordMarkdown(
+		record.embedTitle ?? record.title ?? record.destinationUrl,
+	);
+	const description = escapeDiscordMarkdown(
+		record.embedDescription ??
+			`A transparent ${config.siteName} short link. No click analytics, cookies, or tracking pixels.`,
+	);
+	const privacyUrl = new URL("/privacy", pageUrl).toString();
+	const extraMediaText = (gallery: typeof media): string | undefined => {
+		const omitted = media.slice(gallery.length);
+		if (!omitted.length) return undefined;
+		const noun = omitted.every((item) => item.kind === "image")
+			? "image"
+			: "media item";
+		return `-# +${omitted.length} more ${noun}${omitted.length === 1 ? "" : "s"} at the destination.`;
+	};
+	const buildComponent = (gallery: typeof media) => {
+		const extra = extraMediaText(gallery);
+		return {
+			component: {
+				type: 17,
+				accent_color: Number.parseInt(config.brandColor.slice(1), 16),
+				components: [
+					{ type: 10, content: `## ${title}` },
+					{ type: 10, content: description },
+					...(gallery.length
+						? [
+								{
+									type: 12,
+									items: gallery.map((item) => ({
+										media: { url: item.url },
+										...(item.description
+											? { description: escapeDiscordMarkdown(item.description) }
+											: {}),
+									})),
+								},
+							]
+						: []),
+					...(extra ? [{ type: 10, content: extra }] : []),
+					{ type: 14, spacing: 1 },
+					{
+						type: 10,
+						content:
+							"-# AITSYS Go is a privacy-first, self-hostable link shortener.",
+					},
+					{
+						type: 1,
+						components: [
+							{ type: 2, style: 5, label: "Open", url: record.destinationUrl },
+							{ type: 2, style: 5, label: "Privacy", url: privacyUrl },
+							{
+								type: 2,
+								style: 5,
+								label: "Selfhost",
+								url: AITSYS_GO_REPOSITORY,
+							},
+						],
+					},
+				],
+			},
+		};
+	};
+	const encoder = new TextEncoder();
+	const fits = (candidate: typeof media) =>
+		encoder.encode(scriptSafeJson(buildComponent(candidate))).byteLength <=
+		DISCORD_COMPONENT_EMBED_MAX_BYTES;
+	const gallery: typeof media = [];
+	for (const item of media) {
+		if (!fits([...gallery, item])) break;
+		gallery.push(item);
+	}
+	const component = buildComponent(gallery);
+	const json = scriptSafeJson(component);
+	return encoder.encode(json).byteLength <= DISCORD_COMPONENT_EMBED_MAX_BYTES
+		? `<script id="discord:component-embed" type="application/json">${json}</script>`
+		: "";
 }
 
 function metaTags(
@@ -53,6 +204,7 @@ function metaTags(
 		["name", "twitter:card", meta.imageUrl ? "summary_large_image" : "summary"],
 		["name", "twitter:title", title],
 		["name", "twitter:description", description],
+		["name", "theme-color", config.brandColor],
 	];
 
 	if (meta.pageUrl) {
@@ -97,6 +249,7 @@ function page(
 		<meta name="viewport" content="width=device-width, initial-scale=1">
 		<meta name="robots" content="noindex, nofollow">
 		${metaTags(title, config, meta)}
+		${meta.discordComponentEmbed ?? ""}
 		<title>${escapeHtml(title)} · ${escapeHtml(config.siteName)}</title>
 		<link rel="icon" href="${escapeHtml(config.faviconUrl)}">
 		<style>
@@ -390,7 +543,8 @@ function page(
 			headers: {
 				"Cache-Control": "no-store",
 				"Content-Type": "text/html; charset=utf-8",
-				"Content-Security-Policy": "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src https: data:; object-src 'none'; script-src 'none'; style-src 'unsafe-inline'",
+				"Content-Security-Policy":
+					"default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src https: data:; object-src 'none'; script-src 'none'; style-src 'unsafe-inline'",
 				"Permissions-Policy": "camera=(), geolocation=(), microphone=()",
 				"Referrer-Policy": "no-referrer",
 				"X-Content-Type-Options": "nosniff",
@@ -430,7 +584,11 @@ export function privacyPolicy(config: SiteConfig, pageUrl: string): Response {
 		<dl>
 			<div class="meta">
 				<dt>Service and hosting</dt>
-				<dd>The service runs on Cloudflare Workers and uses Cloudflare KV plus SQLite-backed Durable Objects to store and coordinate the application data needed to operate it. Cloudflare may process normal technical request data while providing that infrastructure under its own privacy policy. AITSYS Go stores link destinations, slugs, optional settings, public creator names, ownership, and preview metadata. A short link and its preview details may be publicly visible. Issued API tokens are stored only as hashes.</dd>
+				<dd>The service runs on Cloudflare Workers and uses Cloudflare KV plus SQLite-backed Durable Objects to store and coordinate the application data needed to operate it. Cloudflare may process normal technical request data while providing that infrastructure under its own privacy policy. AITSYS Go stores link destinations, slugs, optional settings, public creator names, ownership, and preview metadata, including a bounded list of public image/video URLs for Discord preview galleries. A short link and its preview details may be publicly visible. Issued API tokens are stored only as hashes.</dd>
+			</div>
+			<div class="meta">
+				<dt>Preview fetching</dt>
+				<dd>The Worker fetches a public destination page when a link is created, when an authorised person refreshes metadata, and when a public Instagram short link has metadata older than three days. The source sees a Worker request, not the visitor's IP address. AITSYS Go does not proxy or rehost social media and does not log clicks.</dd>
 			</div>
 			<div class="meta">
 				<dt>Link passwords and abuse prevention</dt>
@@ -502,6 +660,7 @@ export function splash(
 			pageUrl,
 			siteName: record.embedSiteName,
 			suppressSocialPreview: record.suppressSocialPreview,
+			discordComponentEmbed: discordComponentEmbed(config, record, pageUrl),
 		},
 	);
 }

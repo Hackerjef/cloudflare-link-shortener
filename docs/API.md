@@ -13,7 +13,7 @@ packages.
 
 ## Generated OpenAPI schema
 
-`GET /openapi.json` returns this instance's generated OpenAPI 3.0.3 document. It covers every callable HTTP endpoint, including browser pages, the password form, and Discord's signed interaction webhook. The 3.0.3 format is deliberately compatible with Cloudflare API Shield schema uploads. It intentionally documents schemas and behavior but never exposes credentials, private records, or implementation-only routes.
+`GET /openapi.json` returns this instance's generated OpenAPI 3.0.3 document for the management API and browser routes. The 3.0.3 format is deliberately compatible with Cloudflare API Shield schema uploads. It deliberately excludes Discord's signed interaction webhook: Discord's payload evolves independently, and the Worker verifies every raw interaction with Discord's Ed25519 signature instead. The document never exposes credentials, private records, or implementation-only routes.
 
 ## Timestamp format
 
@@ -456,6 +456,14 @@ Content-Type: application/json
 		"embedTitle": "Example documentation",
 		"embedDescription": "Safe fake documentation link.",
 		"embedImageUrl": "https://www.example.com/preview.png",
+		"embedMedia": [
+			{
+				"kind": "image",
+				"url": "https://www.example.com/preview.png",
+				"width": 1200,
+				"height": 630
+			}
+		],
 		"embedSiteName": "Example",
 		"metadataFetchedAt": "2026-08-26T20:10:00.000Z",
 		"hasPassword": true,
@@ -465,7 +473,13 @@ Content-Type: application/json
 ```
 
 The Worker fetches automatic metadata when creating a link; manually supplied
-embed fields override it. A duplicate slug returns `409` with `duplicate_slug`.
+embed fields override its primary title, description, and image. Responses can
+also contain automatic `embedMedia`: up to ten ordered public image/video items
+for Discord Component Embed galleries. Discord's component document has a
+3,000-byte limit, so the rendered gallery uses the longest source-ordered prefix
+that fits; long signed media URLs can mean fewer than ten items are displayed.
+It is response-only metadata, not a manual request field. A duplicate slug
+returns `409` with `duplicate_slug`.
 
 ### `GET /api/v1/links`
 
@@ -598,7 +612,8 @@ Updates an accessible link. Include at least one field. Supported fields are
 `embedSiteName`. Omit `password` to leave current protection unchanged, send a
 non-empty string to replace it, or send `null` to remove it. Use `null` to clear
 other optional text, expiry, or manual metadata. A changed destination refreshes
-automatic metadata for fields not provided in the same request.
+automatic metadata, including response-only `embedMedia`, for fields not
+provided in the same request.
 
 **Request**
 
@@ -639,7 +654,11 @@ Content-Type: application/json
 
 ### `POST /api/v1/links/:slug/refresh-metadata`
 
-Fetches and stores fresh automatic metadata for the current destination.
+Fetches and stores fresh automatic metadata for the current destination,
+including the up-to-ten-item `embedMedia` gallery. Discord rendering may display
+fewer items when its 3,000-byte component-document limit is reached. A failed
+source fetch returns `502` with `metadata_fetch_failed` and preserves the last
+known preview.
 
 **Request**
 
@@ -716,7 +735,10 @@ redirecting.
 
 `GET /`, `GET /privacy`, `GET /robots.txt`, and `GET /:slug` are browser-facing
 routes rather than JSON management endpoints. `POST /:slug` accepts the HTML
-password form for password-protected links.
+password form for password-protected links. Eligible public short-link pages
+emit conventional Open Graph/Twitter metadata and an inline Discord Component
+Embed payload; the component embed is progressive enhancement and the standard
+metadata remains the fallback.
 
 `POST /api/v1/discord/interactions` is reserved for Discord. Discord signs the raw
 request with Ed25519, so it is not a general client endpoint. Configure and

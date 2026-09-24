@@ -201,11 +201,16 @@ export async function refreshLinkMetadata(
 			| "embedVideoUrl"
 			| "embedVideoWidth"
 			| "embedVideoHeight"
+			| "embedMedia"
 			| "embedSiteName"
 			| "metadataFetchedAt"
+			| "metadataVersion"
 		>
 	>,
 ): Promise<LinkRecord | null> {
+	// A failed upstream read has no timestamp. Never turn a transient social
+	// outage into a destructive metadata clear.
+	if (!metadata.metadataFetchedAt) return getLink(env, slug);
 	return updateLink(env, slug, {
 		embedTitle: metadata.embedTitle,
 		embedDescription: metadata.embedDescription,
@@ -213,8 +218,10 @@ export async function refreshLinkMetadata(
 		embedVideoUrl: metadata.embedVideoUrl,
 		embedVideoWidth: metadata.embedVideoWidth,
 		embedVideoHeight: metadata.embedVideoHeight,
+		embedMedia: metadata.embedMedia,
 		embedSiteName: metadata.embedSiteName,
 		metadataFetchedAt: metadata.metadataFetchedAt ?? new Date().toISOString(),
+		metadataVersion: metadata.metadataVersion,
 	});
 }
 
@@ -460,7 +467,12 @@ export async function createAccount(
 	} finally {
 		if (!(await getAccount(env, id)))
 			await release(env, accountName, accountStorageKey);
-		if (discordReserved && discordName && discordStorageKey && !(await env.LINKS.get(discordStorageKey)))
+		if (
+			discordReserved &&
+			discordName &&
+			discordStorageKey &&
+			!(await env.LINKS.get(discordStorageKey))
+		)
 			await release(env, discordName, discordStorageKey);
 	}
 }
@@ -652,11 +664,19 @@ async function toRecord(
 			: {}),
 		...(input.embedImageUrl ? { embedImageUrl: input.embedImageUrl } : {}),
 		...(input.embedVideoUrl ? { embedVideoUrl: input.embedVideoUrl } : {}),
-		...(input.embedVideoWidth ? { embedVideoWidth: input.embedVideoWidth } : {}),
-		...(input.embedVideoHeight ? { embedVideoHeight: input.embedVideoHeight } : {}),
+		...(input.embedVideoWidth
+			? { embedVideoWidth: input.embedVideoWidth }
+			: {}),
+		...(input.embedVideoHeight
+			? { embedVideoHeight: input.embedVideoHeight }
+			: {}),
+		...(input.embedMedia?.length ? { embedMedia: input.embedMedia } : {}),
 		...(input.embedSiteName ? { embedSiteName: input.embedSiteName } : {}),
 		...(input.metadataFetchedAt
 			? { metadataFetchedAt: input.metadataFetchedAt }
+			: {}),
+		...(input.metadataVersion
+			? { metadataVersion: input.metadataVersion }
 			: {}),
 		...(password
 			? {
@@ -664,7 +684,7 @@ async function toRecord(
 						password,
 						env.LINK_PASSWORD_PEPPER,
 					),
-			  }
+				}
 			: {}),
 		...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
 		...(input.suppressSocialPreview ? { suppressSocialPreview: true } : {}),

@@ -157,6 +157,8 @@ class MemoryCoordinator {
 	private failures = 0;
 	private windowStart?: number;
 	private lockedUntil?: number;
+	private metadataLeaseUntil?: number;
+	private metadataRetryAt?: number;
 
 	async reserve(key: string): Promise<boolean> {
 		if (this.claimed || this.reservation) return false;
@@ -184,7 +186,7 @@ class MemoryCoordinator {
 			? {
 					allowed: false,
 					retryAfterSeconds: Math.ceil((this.lockedUntil - now) / 1000),
-			  }
+				}
 			: { allowed: true };
 	}
 
@@ -195,10 +197,7 @@ class MemoryCoordinator {
 		}
 		this.failures += 1;
 		if (this.failures < 5) return {};
-		const retryAfterSeconds = Math.min(
-			60 * 2 ** (this.failures - 5),
-			60 * 60,
-		);
+		const retryAfterSeconds = Math.min(60 * 2 ** (this.failures - 5), 60 * 60);
 		this.lockedUntil = now + retryAfterSeconds * 1000;
 		return { retryAfterSeconds };
 	}
@@ -207,6 +206,21 @@ class MemoryCoordinator {
 		this.failures = 0;
 		this.windowStart = undefined;
 		this.lockedUntil = undefined;
+	}
+
+	async beginMetadataRefresh(now: number): Promise<boolean> {
+		if (
+			(this.metadataLeaseUntil && this.metadataLeaseUntil > now) ||
+			(this.metadataRetryAt && this.metadataRetryAt > now)
+		)
+			return false;
+		this.metadataLeaseUntil = now + 30_000;
+		return true;
+	}
+
+	async finishMetadataRefresh(now: number, succeeded: boolean): Promise<void> {
+		this.metadataLeaseUntil = undefined;
+		this.metadataRetryAt = succeeded ? undefined : now + 60 * 60_000;
 	}
 }
 
@@ -398,7 +412,7 @@ describe("link shortener", () => {
 		expect(bad.status).toBe(401);
 	});
 
-	test("generates an API Shield-compatible OpenAPI 3.0 document for every callable Worker endpoint", async () => {
+	test("generates an API Shield-compatible OpenAPI 3.0 document for protected API routes", async () => {
 		const response = await app.fetch(
 			new Request("https://go.aitsys.dev/openapi.json"),
 			env(),
@@ -413,46 +427,49 @@ describe("link shortener", () => {
 		expect(response.status).toBe(200);
 		expect(response.headers.get("Content-Type")).toContain("application/json");
 		expect(document.openapi).toBe("3.0.3");
-		expect(document.servers).toEqual([{ url: "https://go.aitsys.dev", description: "This deployed AITSYS Go instance" }]);
+		expect(document.servers).toEqual([
+			{
+				url: "https://go.aitsys.dev/api/v1",
+				description: "This deployed AITSYS Go instance",
+			},
+		]);
 		expect(document.components.securitySchemes).toHaveProperty("bearerAuth");
 
 		const arrayTypedSchemas: string[] = [];
 		const findArrayTypes = (value: unknown, path = "$"): void => {
 			if (Array.isArray(value)) {
-				value.forEach((item, index) => findArrayTypes(item, `${path}[${index}]`));
+				value.forEach((item, index) =>
+					findArrayTypes(item, `${path}[${index}]`),
+				);
 				return;
 			}
 			if (value === null || typeof value !== "object") return;
 			for (const [key, child] of Object.entries(value)) {
-				if (key === "type" && Array.isArray(child)) arrayTypedSchemas.push(`${path}.type`);
+				if (key === "type" && Array.isArray(child))
+					arrayTypedSchemas.push(`${path}.type`);
 				findArrayTypes(child, `${path}.${key}`);
 			}
 		};
 		findArrayTypes(document);
 		expect(arrayTypedSchemas).toEqual([]);
 		for (const path of [
-			"/openapi.json",
-			"/",
-			"/privacy",
-			"/robots.txt",
-			"/api/v1/metadata",
-			"/api/v1/connection-test",
-			"/api/v1/me",
-			"/api/v1/accounts",
-			"/api/v1/accounts/{accountId}",
-			"/api/v1/accounts/{accountId}/discord-user",
-			"/api/v1/accounts/{accountId}/tokens",
-			"/api/v1/tokens",
-			"/api/v1/tokens/{tokenId}/revoke",
-			"/api/v1/admin/links",
-			"/api/v1/links",
-			"/api/v1/links/{slug}",
-			"/api/v1/links/{slug}/refresh-metadata",
-			"/api/v1/links/{slug}/disable",
-			"/api/v1/discord/interactions",
-			"/{slug}",
+			"/metadata",
+			"/connection-test",
+			"/me",
+			"/accounts",
+			"/accounts/{accountId}",
+			"/accounts/{accountId}/discord-user",
+			"/accounts/{accountId}/tokens",
+			"/tokens",
+			"/tokens/{tokenId}/revoke",
+			"/admin/links",
+			"/links",
+			"/links/{slug}",
+			"/links/{slug}/refresh-metadata",
+			"/links/{slug}/disable",
 		])
 			expect(document.paths).toHaveProperty(path);
+		expect(document.paths).not.toHaveProperty("/discord/interactions");
 	});
 
 	test("rejects invalid URLs, duplicate slugs, and reserved slugs", async () => {
@@ -504,7 +521,10 @@ describe("link shortener", () => {
 			new Request("https://go.aitsys.dev/api/v1/links", {
 				method: "POST",
 				headers: authed().headers,
-				body: JSON.stringify({ destinationUrl: "https://example.com", title: "x".repeat(33_000) }),
+				body: JSON.stringify({
+					destinationUrl: "https://example.com",
+					title: "x".repeat(33_000),
+				}),
 			}),
 			env(),
 		);
@@ -531,14 +551,17 @@ describe("link shortener", () => {
 	});
 
 	test("does not follow metadata redirects to unsafe addresses", async () => {
-		const fetchMock = vi.fn(async () =>
-			new Response(null, {
-				status: 302,
-				headers: { Location: "https://127.0.0.1/private" },
-			}),
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(null, {
+					status: 302,
+					headers: { Location: "https://127.0.0.1/private" },
+				}),
 		);
 		vi.stubGlobal("fetch", fetchMock);
-		await expect(fetchTargetMetadata("https://example.com/redirect")).resolves.toEqual({});
+		await expect(
+			fetchTargetMetadata("https://example.com/redirect"),
+		).resolves.toEqual({});
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 
@@ -621,7 +644,31 @@ describe("link shortener", () => {
 		const html = await page.text();
 		expect(html).toContain('property="og:video:type" content="video/mp4"');
 		expect(html).toContain('property="og:video:width" content="720"');
-		expect(html).toContain('content="https://scontent.example.cdninstagram.com/reel.mp4?one=1&two=2"');
+		expect(html).toContain(
+			'content="https://scontent.example.cdninstagram.com/reel.mp4?one=1&two=2"',
+		);
+		const componentJson =
+			/<script id="discord:component-embed" type="application\/json">([\s\S]*?)<\/script>/.exec(
+				html,
+			)?.[1];
+		expect(componentJson).toBeDefined();
+		const component = JSON.parse(componentJson!) as {
+			component: {
+				type: number;
+				components: Array<{
+					type: number;
+					items?: Array<{ media: { url: string } }>;
+				}>;
+			};
+		};
+		expect(component.component.type).toBe(17);
+		expect(
+			component.component.components
+				.find((item) => item.type === 12)
+				?.items?.map((item) => item.media.url),
+		).toEqual([
+			"https://scontent.example.cdninstagram.com/reel.mp4?one=1&two=2",
+		]);
 	});
 
 	test("does not turn an image-first Instagram carousel into a video embed", () => {
@@ -631,6 +678,56 @@ describe("link shortener", () => {
 			"https://www.instagram.com/p/Cat_123-/",
 		);
 		expect(metadata.embedVideoUrl).toBeUndefined();
+		expect(metadata.embedMedia).toEqual([
+			{
+				kind: "video",
+				url: "https://scontent.example.cdninstagram.com/later.mp4",
+			},
+			{
+				kind: "image",
+				url: "https://scontent.example.cdninstagram.com/first.jpg",
+			},
+		]);
+	});
+
+	test("keeps ordered generic Open Graph galleries within Discord's ten-item limit", () => {
+		const images = Array.from(
+			{ length: 12 },
+			(_, index) =>
+				`<meta property="og:image" content="https://cdn.example.test/${index}.jpg">`,
+		).join("\n");
+		const metadata = extractEmbedMetadata(
+			`<head>${images}</head>`,
+			"https://example.test/post",
+		);
+		expect(metadata.embedMedia).toHaveLength(10);
+		expect(metadata.embedMedia?.[0]?.url).toBe(
+			"https://cdn.example.test/0.jpg",
+		);
+		expect(metadata.embedMedia?.[9]?.url).toBe(
+			"https://cdn.example.test/9.jpg",
+		);
+	});
+
+	test("keeps Instagram carousel media in source order", () => {
+		const metadata = extractEmbedMetadata(
+			`<script type="application/json">{"carousel_media":[{"media_type":1,"display_url":"https://scontent.example.cdninstagram.com/one.jpg","original_width":1080,"original_height":1080},{"media_type":2,"video_versions":[{"url":"https://scontent.example.cdninstagram.com/two.mp4"}],"original_width":720,"original_height":1280}]}</script>`,
+			"https://www.instagram.com/p/Cat_123-/",
+		);
+		expect(metadata.embedMedia).toEqual([
+			{
+				kind: "image",
+				url: "https://scontent.example.cdninstagram.com/one.jpg",
+				width: 1080,
+				height: 1080,
+			},
+			{
+				kind: "video",
+				url: "https://scontent.example.cdninstagram.com/two.mp4",
+				width: 720,
+				height: 1280,
+			},
+		]);
 	});
 
 	test("reads Instagram video state that appears after the ordinary metadata head", async () => {
@@ -652,6 +749,43 @@ describe("link shortener", () => {
 		);
 	});
 
+	test("refreshes stale Instagram metadata before rendering a public short link", async () => {
+		const envValue = env();
+		const record = await createStoredLink(envValue, {
+			slug: "stale-reel",
+			destinationUrl: "https://www.instagram.com/reel/Cat_123-/",
+			creator: "Lulalaby",
+			embedTitle: "Old reel",
+			embedImageUrl: "https://scontent.example.cdninstagram.com/old.jpg",
+			metadataFetchedAt: "2026-01-01T00:00:00.000Z",
+		});
+		expect(typeof record).not.toBe("string");
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response(
+						`<head><meta property="og:title" content="Fresh reel"><meta property="og:image" content="https://scontent.example.cdninstagram.com/fresh.jpg"></head>`,
+						{ headers: { "Content-Type": "text/html" } },
+					),
+			),
+		);
+
+		const response = await app.fetch(
+			new Request("https://go.aitsys.dev/stale-reel"),
+			envValue,
+		);
+		const html = await response.text();
+		expect(html).toContain("Fresh reel");
+		const stored = await app.fetch(
+			new Request("https://go.aitsys.dev/api/v1/links/stale-reel", authed()),
+			envValue,
+		);
+		expect(
+			((await stored.json()) as { result: LinkRecord }).result.embedImageUrl,
+		).toBe("https://scontent.example.cdninstagram.com/fresh.jpg");
+	});
+
 	test("uses X's highest-bitrate public MP4 variant", () => {
 		const metadata = extractEmbedMetadata(
 			`<head><meta property="og:title" content="smol silly cat (@Catsillyness) on X"></head>
@@ -664,6 +798,31 @@ describe("link shortener", () => {
 		);
 		expect(metadata.embedVideoWidth).toBe(1276);
 		expect(metadata.embedVideoHeight).toBe(1280);
+		expect(metadata.embedMedia).toEqual([
+			{
+				kind: "video",
+				url: "https://video.twimg.com/amplify_video/1/vid/avc1/1276x1280/best.mp4?tag=29",
+				width: 1276,
+				height: 1280,
+			},
+		]);
+	});
+
+	test("keeps X photos and videos belonging to the requested post", () => {
+		const metadata = extractEmbedMetadata(
+			`<script>"client:VHdlZXQ6MjA5NDkwNjAwMjE2ODU5MDYyOA==:media_entities2:0":$R[1]={type:"photo",media_url_https:"https:\/\/pbs.twimg.com\/media\/one.jpg"}
+"client:VHdlZXQ6MjA5NDkwNjAwMjE2ODU5MDYyOA==:media_entities2:1:video_info:variants:0":$R[2]={bitrate:800000,content_type:"video/mp4",url:"https:\/\/video.twimg.com\/amplify_video\/1\/vid\/avc1\/640x360\/two.mp4"}</script>`,
+			"https://x.com/Catsillyness/status/2094906002168590628",
+		);
+		expect(metadata.embedMedia).toEqual([
+			{ kind: "image", url: "https://pbs.twimg.com/media/one.jpg" },
+			{
+				kind: "video",
+				url: "https://video.twimg.com/amplify_video/1/vid/avc1/640x360/two.mp4",
+				width: 640,
+				height: 360,
+			},
+		]);
 	});
 
 	test("does not use a reply's video for an X image post", () => {
@@ -719,6 +878,146 @@ describe("link shortener", () => {
 		expect(disabledHtml).not.toContain("Continue to destination");
 	});
 
+	test("renders a safe Component Embed alongside normal metadata", async () => {
+		const envValue = env();
+		await createStoredLink(envValue, {
+			slug: "component-safe",
+			destinationUrl: "https://example.test/post",
+			creator: "Lulalaby",
+			embedTitle: "</script> **hello** @everyone",
+			embedDescription: "[not a link](https://example.test) <b>no HTML</b>",
+			embedMedia: Array.from({ length: 12 }, (_, index) => ({
+				kind: "image" as const,
+				url: `https://cdn.example.test/${index}.jpg`,
+			})),
+		});
+		const response = await app.fetch(
+			new Request("https://go.aitsys.dev/component-safe"),
+			envValue,
+		);
+		const html = await response.text();
+		expect(html).toContain('property="og:title"');
+		expect(html).not.toContain("</script> **hello**");
+		const json =
+			/<script id="discord:component-embed" type="application\/json">([\s\S]*?)<\/script>/.exec(
+				html,
+			)?.[1];
+		expect(json).toBeDefined();
+		const component = JSON.parse(json!) as {
+			component: {
+				components: Array<{
+					type: number;
+					content?: string;
+					items?: unknown[];
+					components?: unknown[];
+				}>;
+			};
+		};
+		const components = component.component.components;
+		expect(components.find((item) => item.type === 12)?.items).toHaveLength(10);
+		expect(components).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					type: 10,
+					content: expect.stringMatching(/^## /),
+				}),
+				expect.objectContaining({
+					type: 10,
+					content: expect.stringContaining("not a link"),
+				}),
+				expect.objectContaining({
+					type: 10,
+					content: expect.stringContaining("privacy-first"),
+				}),
+			]),
+		);
+		const actionRow = components.find((item) => item.type === 1);
+		expect(actionRow?.components).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ label: "Open" }),
+				expect.objectContaining({
+					label: "Privacy",
+					url: "https://go.aitsys.dev/privacy",
+				}),
+				expect.objectContaining({
+					label: "Selfhost",
+					url: "https://github.com/Aiko-IT-Systems/cloudflare-link-shortener",
+				}),
+			]),
+		);
+
+		await createStoredLink(envValue, {
+			slug: "component-default-description",
+			destinationUrl: "https://example.test/default-description",
+			creator: "Lulalaby",
+		});
+		const fallbackHtml = await (
+			await app.fetch(
+				new Request("https://go.aitsys.dev/component-default-description"),
+				envValue,
+			)
+		).text();
+		const fallbackJson =
+			/<script id="discord:component-embed" type="application\/json">([\s\S]*?)<\/script>/.exec(
+				fallbackHtml,
+			)?.[1];
+		const fallback = JSON.parse(fallbackJson!) as {
+			component: { components: Array<{ type: number; content?: string }> };
+		};
+		expect(
+			fallback.component.components.find((item) =>
+				item.content?.startsWith("A transparent"),
+			)?.content,
+		).toContain("No click analytics");
+
+		await createStoredLink(envValue, {
+			slug: "component-byte-limit",
+			destinationUrl: "https://example.test/large-gallery",
+			creator: "Lulalaby",
+			embedMedia: Array.from({ length: 6 }, (_, index) => ({
+				kind: "image" as const,
+				url: `https://cdn.example.test/${index}/${"signed-media-token-".repeat(28)}image.jpg`,
+			})),
+		});
+		const byteLimitedHtml = await (
+			await app.fetch(
+				new Request("https://go.aitsys.dev/component-byte-limit"),
+				envValue,
+			)
+		).text();
+		const byteLimitedJson =
+			/<script id="discord:component-embed" type="application\/json">([\s\S]*?)<\/script>/.exec(
+				byteLimitedHtml,
+			)?.[1];
+		expect(byteLimitedJson).toBeDefined();
+		expect(
+			new TextEncoder().encode(byteLimitedJson).byteLength,
+		).toBeLessThanOrEqual(3_000);
+		const byteLimited = JSON.parse(byteLimitedJson!) as {
+			component: {
+				components: Array<{
+					type: number;
+					content?: string;
+					items?: unknown[];
+				}>;
+			};
+		};
+		const boundedGallery = byteLimited.component.components.find(
+			(item) => item.type === 12,
+		)?.items;
+		expect(boundedGallery?.length).toBeGreaterThan(0);
+		expect(boundedGallery?.length).toBeLessThan(6);
+		expect(byteLimited.component.components).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					content: expect.stringMatching(
+						/^\-# \+\d+ more images at the destination\.$/,
+					),
+				}),
+			]),
+		);
+	});
+
 	test("refreshes target embed metadata", async () => {
 		const envValue = env();
 		await create(envValue, {
@@ -756,6 +1055,32 @@ describe("link shortener", () => {
 		expect(response.status).toBe(200);
 		expect(body.result.embedTitle).toBe("Refreshed Title");
 		expect(body.result.embedDescription).toBe("Refreshed description.");
+	});
+
+	test("keeps existing metadata when an explicit refresh cannot fetch the destination", async () => {
+		const envValue = env();
+		await createStoredLink(envValue, {
+			slug: "refresh-failure",
+			destinationUrl: "https://example.test/post",
+			creator: "Lulalaby",
+			embedTitle: "Still here",
+			metadataFetchedAt: "2026-08-01T00:00:00.000Z",
+		});
+		vi.mocked(fetch).mockResolvedValueOnce(
+			new Response("nope", { status: 503 }),
+		);
+		const response = await app.fetch(
+			new Request(
+				"https://go.aitsys.dev/api/v1/links/refresh-failure/refresh-metadata",
+				authed({ method: "POST" }),
+			),
+			envValue,
+		);
+		expect(response.status).toBe(502);
+		expect(
+			(await envValue.LINKS.get<LinkRecord>("link:refresh-failure", "json"))
+				?.embedTitle,
+		).toBe("Still here");
 	});
 
 	test("requires a password before rendering the destination splash", async () => {
@@ -979,6 +1304,8 @@ describe("link shortener", () => {
 		expect(html).toContain("privacy@cats.example");
 		expect(html).toContain("Google Play's in-app update service");
 		expect(html).toContain("device metadata");
+		expect(html).toContain("metadata older than three days");
+		expect(html).toContain("does not proxy or rehost social media");
 		expect(html).toContain(
 			"does not use advertising, analytics, click tracking, cookies, or telemetry",
 		);
@@ -994,8 +1321,8 @@ describe("link shortener", () => {
 		);
 		expect(html).toContain("automatically deleted");
 		expect(response.headers.get("Content-Security-Policy")).toContain(
-		"frame-ancestors 'none'",
-	);
+			"frame-ancestors 'none'",
+		);
 		expect(response.headers.get("X-Frame-Options")).toBe("DENY");
 		expect(html).toContain("excludes it from Android backup");
 		expect(html).toContain("up to 15 minutes");
@@ -1261,9 +1588,9 @@ describe("link shortener", () => {
 					discordUserId,
 				}),
 			});
-		expect((await app.fetch(createAccountRequest("first-cat"), envValue)).status).toBe(
-			201,
-		);
+		expect(
+			(await app.fetch(createAccountRequest("first-cat"), envValue)).status,
+		).toBe(201);
 		expect(
 			(
 				await app.fetch(
@@ -1275,9 +1602,9 @@ describe("link shortener", () => {
 				)
 			).status,
 		).toBe(200);
-		expect((await app.fetch(createAccountRequest("second-cat"), envValue)).status).toBe(
-			201,
-		);
+		expect(
+			(await app.fetch(createAccountRequest("second-cat"), envValue)).status,
+		).toBe(201);
 	});
 
 	test("lists all links and sanitized token records for administrators", async () => {
@@ -1542,11 +1869,16 @@ describe("link shortener", () => {
 				expect(body.data.content).toContain(
 					"keyed one-way client-address identifier",
 				);
+				expect(body.data.content).toContain(
+					"Instagram preview is over three days old",
+				);
 				expect(body.data.content).toContain("automatically deleted");
 				expect(body.data.content).toContain(
 					"Google Play-distributed Android installs use Google Play's in-app update service",
 				);
-				expect(body.data.content).toContain("does not receive that update-check data");
+				expect(body.data.content).toContain(
+					"does not receive that update-check data",
+				);
 			}
 		}
 	});

@@ -43,18 +43,25 @@ a secure origin.
 Connect your fork under **Workers & Pages → Create → Connect to Git**. Select
 `main` as the production branch and use these production-only settings:
 
-| Setting                      | Value            |
-|------------------------------|------------------|
-| Build command                | none             |
-| Deploy command               | `npm run deploy` |
-| Root directory               | `/`              |
-| Non-production branch builds | disabled         |
-| Build cache                  | enabled          |
+| Setting                      | Value                                |
+|------------------------------|--------------------------------------|
+| Build command                | `npm ci`                             |
+| Deploy command               | `npm run deploy`                     |
+| Root directory               | `/`                                  |
+| Non-production branch builds | disabled                             |
+| Build cache                  | enabled                              |
+| Build variable               | `SKIP_DEPENDENCY_INSTALL` = `1`      |
 
 Do not configure a preview deploy command or preview environment. The Worker
 configuration automatically provisions and binds its `LINKS` KV namespace on
 first deployment. It holds links, accounts, token hashes, ownership indexes,
 and short-lived Discord batch state; it is not disposable cache.
+
+`SKIP_DEPENDENCY_INSTALL=1` disables Workers Builds' automatic dependency
+installer. The explicit `npm ci` build command then performs the same
+lockfile-strict installation with visible output before `npm run deploy` runs.
+Keep the build cache enabled: it still caches npm's download cache, while
+avoiding an opaque pre-build install failure or a duplicate installation.
 
 The deployment automatically provisions a SQLite-backed `LinkCoordinator`
 Durable Object as well. It coordinates creation-time uniqueness and temporary,
@@ -150,7 +157,25 @@ After deployment, visit your `/privacy` page and `/api/v1/metadata` endpoint.
 Create one harmless test link, verify the destination preview and redirect,
 then delete or disable it.
 
-## 7. Bootstrap accounts and clients
+## 8. Enabling API validation with Cloudflare
+
+Cloudflare offers a free **API Shield** feature that can validate and block invalid requests to the AITSYS Go API.
+
+### Steps to enable it
+
+1. Visit `/openapi.json` on your deployed Worker to get the API Shield-compatible OpenAPI specification and download it. It deliberately excludes Discord's interaction webhook.
+2. Go to https://dash.cloudflare.com/?to=/:account/:zone/security/settings?search=schema and enable **Schema Validation**.
+3. Go to https://dash.cloudflare.com/?to=/:account/:zone/security/settings/api-abuse/uploaded-schemas and upload the OpenAPI specification you downloaded.
+4. Choose **Block** as default action for invalid requests. This will ensure that any request that does not conform to the OpenAPI specification will be blocked.
+5. Click **Add schema and endpoints** to save the configuration.
+6. Go to https://dash.cloudflare.com/:account/:zone/security/security-rules/custom-rules
+7. Either create a new rule or edit an existing one (which is set to **Block**) to include the following expression:
+```text
+http.host eq "go.example.com" and http.request.uri.path ne "/api/v1/discord/interactions" and (cf.schema_validation.uploaded.violated)
+```
+8. Save the rule and deploy it. This keeps schema validation on the documented API routes while leaving Discord's signed webhook to the Worker's Ed25519 verification. Do not add the Discord webhook to an API Shield schema-validation blocking rule.
+
+## 9. Bootstrap accounts and clients
 
 Use the master credential only from an administrator shell or the `short-admin`
 tool to create an account and issue an account token. The full request and
@@ -170,7 +195,7 @@ The extension and Android app fetch `/api/v1/metadata` from that origin, so
 their displayed name, logo, colour, favicon/icon shortcut data, and privacy
 contact follow your Worker branding.
 
-## 8. Use existing releases instead of building apps
+## 10. Use existing releases instead of building apps
 
 Open this project's [GitHub Releases](https://github.com/Aiko-IT-Systems/cloudflare-link-shortener/releases) and download the assets
 that match the version you want to test:
@@ -191,11 +216,24 @@ The prebuilt clients are compatible with any correctly configured Worker using
 this API. If you change client code or need a custom package identity, build
 from your fork instead; see [BUILDING.md](BUILDING.md).
 
-## 9. Optional Discord app and command publishing
+## 11. Optional Discord app and command publishing
 
 Configure Discord only after the Worker is live at your final HTTPS origin. This
 project uses Discord's **User Install** context and exposes commands only in
 private channels (DMs and group DMs), not as a server-installed bot.
+
+### Discord link previews
+
+Public short-link pages include conventional Open Graph/Twitter metadata and a
+server-rendered Discord Component Embed payload. Discord's crawler must receive
+the HTML and every linked image/video without a login, JavaScript challenge, or
+bot challenge. If your zone uses WAF or bot-protection rules, allow the
+`Discordbot` crawler to fetch public `/:slug` pages and their public media URLs;
+do not weaken the separate signed interaction endpoint protection. Discord falls
+back to ordinary Open Graph metadata when the component payload or an asset is
+unavailable. The Worker stores at most ten gallery items, but emits only the
+longest ordered prefix that fits Discord's 3,000-byte component-document limit;
+signed social-CDN URLs can therefore reduce the displayed number of images.
 
 ### Configure the Discord application
 
@@ -252,7 +290,7 @@ DM before inviting other users. The Discord bot/registration token must never
 be stored in Cloudflare bindings, GitHub secrets for the Worker, source control,
 or screenshots.
 
-## Ongoing safety checklist
+## 12. Ongoing safety checklist
 
 - Keep GitHub Actions disabled unless you deliberately configure the release
   process and its signing secrets for your fork.
